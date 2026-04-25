@@ -1,0 +1,33 @@
+services:
+  - type: web
+    name: cadence-backend
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: NODE_ENV
+        value: production
+      - key: SERPAPI_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false
+      - key: SERPAPI_LOCATION
+        value: India
+      - key: SERPAPI_GOOGLE_DOMAIN
+        value: google.co.in
+      - key: SERPAPI_GL
+        value: in
+      - key: SERPAPI_HL
+        value: en
+      - key: SERPAPI_MAX_QUERIES
+        value: 5
+      - key: SERPAPI_RESULTS_PER_QUERY
+        value: 10
+      - key: SERPAPI_TIMEOUT_MS
+        value: 18000
+      - key: ENVIRONMENT_API_TIMEOUT_MS
+        value: 8000
