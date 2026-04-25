@@ -53,6 +53,10 @@ function round(value) {
   return Number.isFinite(value) ? Math.round(Number(value)) : 0
 }
 
+function isTransientSourceError(error) {
+  return error?.status === 429 || error?.status === 504 || error?.status >= 500
+}
+
 function stripPostOfficeSuffix(value) {
   return cleanString(value)
     .replace(/\s+(B\.?O\.?|S\.?O\.?|H\.?O\.?|G\.?P\.?O\.?|NDSO|NSH)$/i, '')
@@ -110,12 +114,83 @@ async function lookupZippopotam(pincode) {
   }
 }
 
+function preferredPostalOffice(results = []) {
+  return [...results]
+    .filter(Boolean)
+    .sort((a, b) => {
+      const aDelivery = cleanString(a.DeliveryStatus).toLowerCase() === 'delivery' ? 0 : 1
+      const bDelivery = cleanString(b.DeliveryStatus).toLowerCase() === 'delivery' ? 0 : 1
+      const aHeadOffice = cleanString(a.BranchType).toLowerCase().includes('head') ? 0 : 1
+      const bHeadOffice = cleanString(b.BranchType).toLowerCase().includes('head') ? 0 : 1
+      return aDelivery - bDelivery || aHeadOffice - bHeadOffice
+    })[0]
+}
+
+async function geocodeIndianLocation({ city, state, pincode }) {
+  const query = cleanString(city || state || pincode)
+  if (!query) {
+    throw new HttpError(404, 'Could not geocode this pincode.')
+  }
+
+  const url = new URL('https://geocoding-api.open-meteo.com/v1/search')
+  url.search = new URLSearchParams({
+    name: query,
+    count: '10',
+    language: 'en',
+    format: 'json',
+  }).toString()
+
+  const payload = await fetchJson(url.toString())
+  const stateName = titleCase(state)
+  const candidates = Array.isArray(payload?.results) ? payload.results : []
+  const match = candidates
+    .filter((candidate) => cleanString(candidate?.country_code).toUpperCase() === 'IN')
+    .filter((candidate) => !stateName || titleCase(candidate?.admin1) === stateName)
+    .find((candidate) => numberValue(candidate?.latitude) !== undefined && numberValue(candidate?.longitude) !== undefined)
+
+  if (!match) {
+    throw new HttpError(404, 'Could not geocode this pincode.')
+  }
+
+  return {
+    city: titleCase(city) || titleCase(match.name) || `Pincode ${pincode}`,
+    state: stateName || titleCase(match.admin1),
+    latitude: Number(match.latitude),
+    longitude: Number(match.longitude),
+  }
+}
+
+async function lookupPostalPincode(pincode) {
+  const payload = await fetchJson(`https://api.postalpincode.in/pincode/${encodeURIComponent(pincode)}`)
+  const group = Array.isArray(payload) ? payload.find((entry) => cleanString(entry?.Status).toLowerCase() === 'success') : undefined
+  const postOffice = preferredPostalOffice(group?.PostOffice)
+
+  if (!postOffice) {
+    throw new HttpError(404, 'Could not find this pincode in the India Post directory.')
+  }
+
+  const city = titleCase(postOffice.District || postOffice.Block || postOffice.Name)
+  const state = titleCase(postOffice.State)
+  const location = await geocodeIndianLocation({ city, state, pincode })
+
+  return {
+    ...location,
+    source: 'postalpincode:open-meteo-geocode',
+  }
+}
+
 async function lookupPincodeLocation(pincode) {
   try {
     return await lookupPincodesInfo(pincode)
   } catch (error) {
-    if (error.status && error.status < 500 && error.status !== 404) throw error
-    return lookupZippopotam(pincode)
+    if (error.status && !isTransientSourceError(error) && error.status !== 404) throw error
+  }
+
+  try {
+    return await lookupZippopotam(pincode)
+  } catch (error) {
+    if (error.status && !isTransientSourceError(error) && error.status !== 404) throw error
+    return lookupPostalPincode(pincode)
   }
 }
 
@@ -204,7 +279,12 @@ async function fetchOpenMeteoEnvironment(location) {
     timezone: 'auto',
   }).toString()
 
-  const [air, weather] = await Promise.all([fetchJson(airUrl.toString()), fetchJson(weatherUrl.toString())])
+  const air = await fetchJson(airUrl.toString())
+  const weather = await fetchJson(weatherUrl.toString()).catch((error) => {
+    if (isTransientSourceError(error)) return undefined
+    throw error
+  })
+
   const aqi = round(numberValue(air?.current?.us_aqi))
   const pm25 = round(numberValue(air?.current?.pm2_5))
   const pm10 = round(numberValue(air?.current?.pm10))
